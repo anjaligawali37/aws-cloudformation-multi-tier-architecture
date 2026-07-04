@@ -1,0 +1,6 @@
+*.pem
+.vscode/
+.idea/
+*.log
+.aws/
+.DS_Store

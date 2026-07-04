@@ -1,0 +1,472 @@
+AWSTemplateFormatVersion: "2010-09-09"
+Description: Create a VPC using AWS CloudFormation
+
+Parameters:
+  KeyPairName:
+    Type: AWS::EC2::KeyPair::KeyName
+    Description: Select an Existing EC2 key pair
+  
+  InstanceType:
+    Type: String
+    Default: t3.micro
+    AllowedValues: 
+      - t2.micro
+      - t3.micro
+  LatestAmiId:
+    Type: AWS::SSM::Parameter::Value<AWS::EC2::Image::Id>
+    Default: /aws/service/ami-amazon-linux-latest/al2023-ami-kernel-default-x86_64
+
+Resources:
+  ProjectVPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/16
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+      - Key: Name
+        Value: Project-VPC
+  
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: Project-IGW
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref ProjectVPC
+      InternetGatewayId: !Ref InternetGateway
+      
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProjectVPC
+      CidrBlock: 10.0.1.0/24
+      AvailabilityZone: eu-north-1a
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Public-Subnet-1
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProjectVPC
+      CidrBlock: 10.0.2.0/24
+      AvailabilityZone: eu-north-1b
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: Public-Subnet-2     
+
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProjectVPC
+      CidrBlock: 10.0.3.0/24
+      AvailabilityZone: eu-north-1a
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: Private-Subnet-1
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref ProjectVPC
+      CidrBlock: 10.0.4.0/24
+      AvailabilityZone: eu-north-1b
+      MapPublicIpOnLaunch: false
+      Tags:
+        - Key: Name
+          Value: Private-Subnet-2
+
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ProjectVPC
+      Tags:
+        - Key: Name
+          Value: Public-Route-Table
+  
+  DefaultPublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+      
+  AssociatePublicSubnet1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet1
+
+  AssociatePublicSubnet2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      SubnetId: !Ref PublicSubnet2
+
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref ProjectVPC
+      Tags:
+        - Key: Name
+          Value: Private-Route-Table
+
+  DefaultPrivateRoute:
+    Type: AWS::EC2::Route
+    DependsOn: NatGateway
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NatGateway
+  
+  AssociatePrivateSubnet1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet1
+
+  AssociatePrivateSubnet2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      SubnetId: !Ref PrivateSubnet2
+
+  NatGatewayEIP:
+    Type: AWS::EC2::EIP
+    DependsOn: AttachGateway
+    Properties:
+      Domain: vpc
+  
+  NatGateway:
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt NatGatewayEIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: Nat-Gateway
+  
+  EC2IAMRole:
+    Type: AWS::IAM::Role
+    Properties:
+      RoleName: EC2-IAM-Role
+
+      AssumeRolePolicyDocument:
+        Version: "2012-10-17"
+
+        Statement:
+
+          - Effect: Allow
+
+            Principal:
+              Service:
+                - ec2.amazonaws.com
+
+            Action:
+              - sts:AssumeRole
+
+      ManagedPolicyArns:
+
+        - arn:aws:iam::aws:policy/AmazonSSMManagedInstanceCore
+
+        - arn:aws:iam::aws:policy/CloudWatchAgentServerPolicy
+
+      Tags:
+        - Key: Name
+          Value: EC2-IAM-Role
+
+  Ec2InstanceProfile:
+    Type: AWS::IAM::InstanceProfile
+    Properties:
+      InstanceProfileName: EC2-Instance-Profile
+      Roles: 
+        - !Ref EC2IAMRole
+
+  BastionSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Bastion Host
+      VpcId: !Ref ProjectVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Bastion-Security-Group
+
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security Group for Loadbalancer
+      VpcId: !Ref ProjectVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+      Tags:
+        - Key: Name
+          Value: Load-Balancer-Security-Group
+
+  PrivateEC2SecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Security group for Private EC2
+      VpcId: !Ref ProjectVPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 22
+          ToPort: 22
+          SourceSecurityGroupId: !Ref BastionSecurityGroup
+        
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+      
+      Tags:
+        - Key: Name
+          Value: Private-EC2Instance-Security-Group
+
+  BastionHost:
+    Type: AWS::EC2::Instance
+    DependsOn: AttachGateway
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+    
+      NetworkInterfaces:
+       - DeviceIndex: "0"
+         AssociatePublicIpAddress: true
+         SubnetId: !Ref PublicSubnet1
+         GroupSet: 
+            - !Ref BastionSecurityGroup
+      
+      BlockDeviceMappings:
+       - DeviceName: /dev/xvda
+         Ebs:
+           VolumeSize: 8
+           VolumeType: gp3
+           DeleteOnTermination: true
+      
+      Tags:
+       - Key: Name
+         Value: Bastion-Host
+
+      Monitoring: true
+    
+  PrivateEC2Instance1:
+    Type: AWS::EC2::Instance
+    DependsOn: NatGateway
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      
+      NetworkInterfaces:
+        - DeviceIndex: "0"
+          SubnetId: !Ref PrivateSubnet1
+          GroupSet:
+            - !Ref PrivateEC2SecurityGroup
+          AssociatePublicIpAddress: false
+      
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp3
+            DeleteOnTermination: true
+
+      Monitoring: true
+      Tags:
+        - Key: Name
+          Value: Private-EC2-1
+
+  PrivateEC2Instance2:
+    Type: AWS::EC2::Instance
+    DependsOn: NatGateway
+    Properties:
+      ImageId: !Ref LatestAmiId
+      InstanceType: !Ref InstanceType
+      KeyName: !Ref KeyPairName
+      IamInstanceProfile: !Ref Ec2InstanceProfile
+      
+      NetworkInterfaces:
+       - DeviceIndex: "0"
+         AssociatePublicIpAddress: false
+         SubnetId: !Ref PrivateSubnet2
+         GroupSet:
+           - !Ref PrivateEC2SecurityGroup
+
+      BlockDeviceMappings:
+        - DeviceName: /dev/xvda
+          Ebs:
+            VolumeSize: 8
+            VolumeType: gp3
+            DeleteOnTermination: true
+
+      Monitoring: true
+
+      Tags:
+        - Key: Name
+          Value: Private-EC2-2
+  
+  WebTargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn: 
+      - PrivateEC2Instance1
+      - PrivateEC2Instance2
+    Properties:
+      Name: Web-Target-Group
+      Port: 80
+      Protocol: HTTP
+      VpcId: !Ref ProjectVPC
+      TargetType: instance
+      HealthCheckEnabled: true
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckIntervalSeconds: 30
+      HealthCheckTimeoutSeconds: 5
+
+      HealthyThresholdCount: 2
+      UnhealthyThresholdCount: 2
+      Targets:
+        - Id: !Ref PrivateEC2Instance1
+          Port: 80
+
+        - Id: !Ref PrivateEC2Instance2
+          Port: 80
+      Tags:
+        - Key: Name
+          Value: Web-Target-Group
+  
+  ApplicationLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn: 
+      - AttachGateway
+    Properties:
+      Name: Project-ALB
+      Scheme: internet-facing
+      Type: application
+      IpAddressType: ipv4
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Tags:
+        - Key: Name
+          Value: Project-ALB
+
+  ApplicationLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: 
+      - ApplicationLoadBalancer
+      - WebTargetGroup
+    Properties:
+      LoadBalancerArn: !Ref ApplicationLoadBalancer
+      Protocol: HTTP
+      Port: 80
+      DefaultActions: 
+       - Type: forward
+         TargetGroupArn: !Ref WebTargetGroup
+
+
+Outputs:
+  VPCID:
+    Description: id of the created vpc
+    Value: !Ref ProjectVPC
+    
+  InternetGatewayId:
+    Description: id of the created Internetgateway
+    Value: !Ref InternetGateway
+    
+  PublicSubnet1Id:
+    Description: id of the created  subnet 1
+    Value: !Ref PublicSubnet1
+  
+  PublicSubnet2Id:
+    Description: id of the created subnet 2
+    Value: !Ref PublicSubnet2
+  
+  PrivateSubnet1Id:
+    Description: id of the created subnet 1
+    Value: !Ref PrivateSubnet1
+  
+  PrivateSubnet2Id:
+    Description: id of the created subnet 2
+    Value: !Ref PrivateSubnet2
+  
+  PublicRouteTableId:
+    Description: id of the created route table
+    Value: !Ref PublicRouteTable
+  
+  PrivateRouteTableId:
+    Description: id of the created route table
+    Value: !Ref PrivateRouteTable
+  
+
+  NatGatewayId:
+    Description: id of the created NAT
+    Value: !Ref NatGateway
+  
+  Ec2IAMRole:
+    Description: IAM role for EC2
+    Value: !Ref EC2IAMRole
+  
+  Ec2InstanceProfile:
+    Description: Instance Profile for EC2
+    Value: !Ref Ec2InstanceProfile
+  
+  BastionSecurityGroupId:
+    Description: Bastion security Group Id
+    Value: !Ref BastionSecurityGroup
+  
+  LoadBalancerSecurityGroupId:
+    Description: Load Balancer security Group Id
+    Value: !Ref LoadBalancerSecurityGroup
+  
+  PrivateEC2SecurityGroupId:
+    Description: Private EC2 security Goup Id
+    Value: !Ref PrivateEC2SecurityGroup
+  
+  BastionHostId:
+    Description: Bastion Host Id
+    Value: !Ref BastionHost
+    
+  PrivateInstance1Id:
+    Description: Private Instance 1 Id
+    Value: !Ref PrivateEC2Instance1
+  
+  PrivateInstance2Id:
+    Description: Private Instance 2 Id
+    Value: !Ref PrivateEC2Instance2
+  
+  ApplicationLoadBalancerDNSName:
+    Description: Application Load Balancer DNS Name
+    Value: !GetAtt ApplicationLoadBalancer.DNSName
+  
+  AppliactionLoadBalancerARN:
+    Description: Application Load Balancer ARN Name
+    Value: !Ref ApplicationLoadBalancer
+  
+  ApplicationLoadBalancerListenerARN:
+    Description: Application Load Balancer Listener ARN
+    Value: !Ref ApplicationLoadBalancerListener
+
+    
+
